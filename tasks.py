@@ -19,8 +19,9 @@ def run_match_task(bot1_id, bot2_id):
 
     def start_bot(path):
         return subprocess.Popen(
-            ["docker", "run", "--rm", "-i", "-v", f"{path}:/app/submission.py", "connect4-agent"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ["python", "-u", path],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=os.path.dirname(path) # Run from the bot's folder
         )
 
     print(f"--- STARTING MATCH: {bot1_id} vs {bot2_id} ---")
