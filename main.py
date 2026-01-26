@@ -4,7 +4,6 @@ import sqlite3
 import shutil
 import os
 import uuid
-# Import the "Chef" from our other file
 from tasks import run_match_task 
 
 app = FastAPI()
@@ -18,11 +17,10 @@ os.makedirs(BOTS_DIR, exist_ok=True)
 
 @app.get("/")
 async def get_dashboard():
-    # Connect to DB to get stats
     with sqlite3.connect(DB_FILE) as conn:
         # Get Leaderboard
-        bots = conn.execute("SELECT name, elo, wins, losses FROM bots ORDER BY elo DESC").fetchall()
-        # Get Recent Matches (We look at the last 5)
+        bots = conn.execute("SELECT id, name, elo, wins, losses FROM bots ORDER BY elo DESC").fetchall()
+        # Get Recent Matches
         matches = conn.execute("""
             SELECT m.id, b1.name, b2.name, w.name 
             FROM matches m
@@ -32,12 +30,15 @@ async def get_dashboard():
             ORDER BY m.timestamp DESC LIMIT 5
         """).fetchall()
     
-    # Generate HTML Table for Leaderboard
+    # 1. BUILD DROPDOWN OPTIONS (New!)
+    bot_options = ""
+    for b_id, b_name, elo, w, l in bots:
+        bot_options += f'<option value="{b_id}">{b_name} ({elo})</option>'
+
     leaderboard_rows = ""
-    for rank, (name, elo, w, l) in enumerate(bots, 1):
+    for rank, (b_id, name, elo, w, l) in enumerate(bots, 1):
         leaderboard_rows += f"<tr><td>{rank}</td><td>{name}</td><td>{elo}</td><td>{w}W - {l}L</td></tr>"
 
-    # Generate HTML Table for Recent Matches
     match_rows = ""
     for mid, p1, p2, winner in matches:
         w_text = winner if winner else "Draw"
@@ -52,7 +53,7 @@ async def get_dashboard():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>RL League (Scaled)</title>
+        <title>RL League (Matchmaker)</title>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
             h1, h2 {{ text-align: center; color: #2c3e50; }}
@@ -66,14 +67,26 @@ async def get_dashboard():
             button:hover {{ background: #019e7e; }}
             .fight-btn {{ background: #d63031; width: 100%; font-size: 18px; padding: 15px; }}
             .fight-btn:hover {{ background: #b71c1c; }}
+            select {{ padding: 10px; width: 45%; margin: 5px; font-size: 16px; }}
         </style>
     </head>
     <body>
-        <h1>🏆 RL-Kaggle League (Powered by Celery)</h1>
+        <h1>🏆 RL-Kaggle Arena</h1>
         
-        <div class="card">
+        <div class="card" style="text-align: center;">
+            <h3>⚔️ Matchmaker ⚔️</h3>
             <form action="/fight" method="post">
-                <button type="submit" class="fight-btn">⚔️ QUEUE TOURNAMENT MATCH ⚔️</button>
+                <select name="p1_id" required>
+                    <option value="" disabled selected>Select Player 1</option>
+                    {bot_options}
+                </select>
+                <span style="font-size: 24px; font-weight: bold;">VS</span>
+                <select name="p2_id" required>
+                    <option value="" disabled selected>Select Player 2</option>
+                    {bot_options}
+                </select>
+                <br><br>
+                <button type="submit" class="fight-btn">RUN MATCH</button>
             </form>
         </div>
 
@@ -117,26 +130,22 @@ async def upload_bot(name: str = Form(...), file: UploadFile = File(...)):
     return HTMLResponse(content=f"<script>window.location.href='/'</script>")
 
 @app.post("/fight")
-async def trigger_fight():
-    # 1. Pick two random bots from the DB
+async def trigger_fight(p1_id: str = Form(...), p2_id: str = Form(...)):
+    # 2. RECEIVE THE SELECTED IDS (New Logic!)
     with sqlite3.connect(DB_FILE) as conn:
-        bots = conn.execute("SELECT id, name FROM bots ORDER BY RANDOM() LIMIT 2").fetchall()
-        
-    if len(bots) < 2:
-        return HTMLResponse("<h1>Need 2 bots!</h1><a href='/'>Back</a>")
+        b1 = conn.execute("SELECT name FROM bots WHERE id=?", (p1_id,)).fetchone()
+        b2 = conn.execute("SELECT name FROM bots WHERE id=?", (p2_id,)).fetchone()
     
-    bot1, bot2 = bots[0], bots[1]
+    if not b1 or not b2:
+        return HTMLResponse("<h1>Bot not found!</h1><a href='/'>Back</a>")
+
+    # Send to Kitchen
+    task = run_match_task.delay(p1_id, p2_id)
     
-    # 2. SEND THE TICKET TO THE KITCHEN
-    # We use .delay() to send it to Celery/Redis
-    # The variable 'task' holds the Ticket ID, so we can track it later if we want
-    task = run_match_task.delay(bot1[0], bot2[0])
-    
-    # 3. Respond immediately (Don't wait for the match to finish!)
     return HTMLResponse(f"""
         <div style="font-family: sans-serif; text-align: center; padding: 50px;">
             <h1>👨‍🍳 Match Queued!</h1>
-            <p>The kitchen has received order: <b>{bot1[1]} vs {bot2[1]}</b></p>
+            <p>The kitchen has received order: <b>{b1[0]} vs {b2[0]}</b></p>
             <p>Ticket ID: <code>{task.id}</code></p>
             <br>
             <a href='/'>Return to Dashboard</a>
@@ -146,7 +155,6 @@ async def trigger_fight():
 
 @app.get("/replay/{match_id}")
 async def get_replay(match_id: str):
-    # This logic stays the same - we just read the DB
     with sqlite3.connect(DB_FILE) as conn:
         match = conn.execute("""
             SELECT m.moves, b1.name, b2.name, w.name 
@@ -162,7 +170,6 @@ async def get_replay(match_id: str):
     moves_json, p1_name, p2_name, winner_name = match
     winner_text = f"Winner: {winner_name}" if winner_name else "Draw"
     
-    # (Reusing the same replay HTML/JS from before)
     html = f"""
     <!DOCTYPE html>
     <html>
