@@ -10,6 +10,14 @@ app = FastAPI()
 # --- CONFIGURATION ---
 DB_FILE = "league.db"
 
+# --- ELO MATH ---
+def calculate_elo(winner_elo, loser_elo):
+    k_factor = 32
+    expected_score = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
+    # Winner gains, loser drops
+    change = round(k_factor * (1 - expected_score))
+    return change
+
 # Setup DB (Stores URLs instead of files now)
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
@@ -123,23 +131,47 @@ def register(name: str = Form(...), url: str = Form(...)):
 @app.post("/fight")
 def fight():
     with sqlite3.connect(DB_FILE) as conn:
-        bots = conn.execute("SELECT id, url, name FROM bots").fetchall()
+        bots = conn.execute("SELECT id, url, name, elo FROM bots").fetchall()
     
     if len(bots) < 2:
         return HTMLResponse("Need at least 2 bots! <a href='/'>Back</a>")
     
     # Pick 2 random fighters
     p1, p2 = random.sample(bots, 2)
+    p1_id, p1_url, p1_name, p1_elo = p1
+    p2_id, p2_url, p2_name, p2_elo = p2
     
-    # --- RUN THE MATCH (Synchronous for now, easy to understand) ---
-    winner_local_id, moves = play_match(p1[1], p2[1])
+    # Run the Match
+    winner_local_id, moves = play_match(p1_url, p2_url)
     
-    winner_id = p1[0] if winner_local_id == 1 else (p2[0] if winner_local_id == 2 else None)
-    winner_name = p1[2] if winner_local_id == 1 else (p2[2] if winner_local_id == 2 else "Draw")
-    
-    # Save Result
+    # Determine Winner/Loser
+    if winner_local_id == 0:
+        winner_id = None # Draw
+        change = 0
+    elif winner_local_id == 1:
+        winner_id = p1_id
+        change = calculate_elo(p1_elo, p2_elo)
+    else:
+        winner_id = p2_id
+        change = calculate_elo(p2_elo, p1_elo)
+
+    # Save to Database
     with sqlite3.connect(DB_FILE) as conn:
+        # Record Match
         conn.execute("INSERT INTO matches (id, p1_id, p2_id, winner_id, moves) VALUES (?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), p1[0], p2[0], winner_id, str(moves)))
+                    (str(uuid.uuid4()), p1_id, p2_id, winner_id, str(moves)))
         
-    return HTMLResponse(f"<h1>Match Over!</h1><p>Winner: {winner_name}</p><p>Moves: {moves}</p><a href='/'>Back</a>")
+        # Update Stats
+        if winner_local_id == 1:
+            conn.execute("UPDATE bots SET elo = elo + ?, wins = wins + 1 WHERE id = ?", (change, p1_id))
+            conn.execute("UPDATE bots SET elo = elo - ?, losses = losses + 1 WHERE id = ?", (change, p2_id))
+        elif winner_local_id == 2:
+            conn.execute("UPDATE bots SET elo = elo + ?, wins = wins + 1 WHERE id = ?", (change, p2_id))
+            conn.execute("UPDATE bots SET elo = elo - ?, losses = losses + 1 WHERE id = ?", (change, p1_id))
+            
+    return HTMLResponse(f"""
+        <h1>Match Over!</h1>
+        <p>Winner: {p1_name if winner_local_id == 1 else (p2_name if winner_local_id==2 else 'Draw')}</p>
+        <p>ELO Change: ±{change}</p>
+        <a href='/'>Back to Leaderboard</a>
+    """)
